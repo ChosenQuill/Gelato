@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using Gelato.Config;
 using Gelato.Providers;
 using Gelato.Services;
 using Jellyfin.Data;
@@ -44,7 +45,8 @@ public sealed class MediaSourceManagerDecorator(
     Lazy<GelatoManager> manager,
     Lazy<SubtitleProvider> subtitleProvider,
     IMediaSegmentManager mediaSegmentManager,
-    IEnumerable<ICustomMetadataProvider<Video>> videoProbeProviders
+    IEnumerable<ICustomMetadataProvider<Video>> videoProbeProviders,
+    Func<Guid, PluginConfiguration>? configResolver = null
 ) : IMediaSourceManager
 {
     private readonly IMediaSourceManager _inner =
@@ -54,6 +56,7 @@ public sealed class MediaSourceManagerDecorator(
     private readonly IHttpContextAccessor _http =
         http ?? throw new ArgumentNullException(nameof(http));
     private readonly KeyLock _lock = new();
+    private readonly KeyLock _probeLock = new();
     private readonly IMediaSegmentManager _mediaSegmentManager =
         mediaSegmentManager ?? throw new ArgumentNullException(nameof(mediaSegmentManager));
     private readonly ILibraryManager _libraryManager =
@@ -62,6 +65,8 @@ public sealed class MediaSourceManagerDecorator(
         config ?? throw new ArgumentNullException(nameof(config));
     private readonly Lazy<GelatoManager> _manager = manager;
     private readonly Lazy<SubtitleProvider> _subtitleProvider = subtitleProvider;
+    private readonly Func<Guid, PluginConfiguration> _configResolver =
+        configResolver ?? (userId => GelatoPlugin.Instance!.GetConfig(userId));
 
     //  private readonly Lazy<ISubtitleManager> _subtitleManager = subtitleManager ?? throw new ArgumentNullException(nameof(subtitleManager));
     private readonly ICustomMetadataProvider<Video>? _probeProvider =
@@ -86,9 +91,15 @@ public sealed class MediaSourceManagerDecorator(
             ctx.TryGetUserId(out userId);
         }
 
-        var cfg = GelatoPlugin.Instance!.GetConfig(userId);
+        var cfg = _configResolver(userId);
         if (
-            (!cfg.EnableMixed && !item.IsGelato())
+            (
+                !cfg.EnableMixed
+                && !MediaSourcePlaybackPolicy.IsGelatoOwnedItem(
+                    item.HasStreamTag(),
+                    item.Path
+                )
+            )
             || item.GetBaseItemKind() is not (BaseItemKind.Movie or BaseItemKind.Episode)
         )
         {
@@ -310,14 +321,32 @@ public sealed class MediaSourceManagerDecorator(
         CancellationToken ct
     )
     {
-        if (item.GetBaseItemKind() is not (BaseItemKind.Movie or BaseItemKind.Episode))
+        var itemKind = item.GetBaseItemKind();
+        if (itemKind is not (BaseItemKind.Movie or BaseItemKind.Episode))
         {
             return await _inner
                 .GetPlaybackMediaSources(item, user, allowMediaProbe, enablePathSubstitution, ct)
                 .ConfigureAwait(false);
         }
 
-        var manager = _manager.Value;
+        var isGelatoItem = MediaSourcePlaybackPolicy.IsGelatoOwnedItem(
+            item.HasStreamTag(),
+            item.Path
+        );
+        var cfg = _configResolver(user.Id);
+        if (
+            !MediaSourcePlaybackPolicy.ShouldHandlePlayback(
+                itemKind,
+                cfg.EnableMixed,
+                isGelatoItem
+            )
+        )
+        {
+            return await _inner
+                .GetPlaybackMediaSources(item, user, allowMediaProbe, enablePathSubstitution, ct)
+                .ConfigureAwait(false);
+        }
+
         var ctx = _http.HttpContext;
 
         var sources = GetStaticMediaSources(item, enablePathSubstitution, user);
@@ -346,6 +375,17 @@ public sealed class MediaSourceManagerDecorator(
             return sources;
 
         var owner = ResolveOwnerFor(selected, item);
+        var ownerIsGelato = MediaSourcePlaybackPolicy.IsGelatoOwnedItem(
+            owner.HasStreamTag(),
+            owner.Path
+        );
+        if (!ownerIsGelato)
+        {
+            return await _inner
+                .GetPlaybackMediaSources(item, user, allowMediaProbe, enablePathSubstitution, ct)
+                .ConfigureAwait(false);
+        }
+
         if (owner.IsPrimaryVersion() && owner.Id != item.Id)
         {
             sources = GetStaticMediaSources(owner, enablePathSubstitution, user);
@@ -354,23 +394,40 @@ public sealed class MediaSourceManagerDecorator(
                 return sources;
         }
 
-        if (NeedsProbe(selected))
+        if (
+            MediaSourcePlaybackPolicy.ShouldProbe(
+                allowMediaProbe,
+                isGelatoStream: owner.HasStreamTag(),
+                selected.Path,
+                NeedsProbe(selected)
+            )
+        )
         {
-            var libraryOptions = _libraryManager.GetLibraryOptions(owner);
+            await _probeLock
+                .RunSingleFlightAsync(
+                    owner.Id,
+                    async probeCt =>
+                    {
+                        var libraryOptions = _libraryManager.GetLibraryOptions(owner);
+                        var segmentTask = _mediaSegmentManager.RunSegmentPluginProviders(
+                            owner,
+                            libraryOptions,
+                            false,
+                            probeCt
+                        );
+                        var metadataTask = ProbeStreamAsync(
+                            (Video)owner,
+                            selected.Path,
+                            probeCt
+                        );
 
-            var segmentTask = _mediaSegmentManager.RunSegmentPluginProviders(
-                owner,
-                libraryOptions,
-                false,
-                ct
-            );
-            var metadataTask = ProbeStreamAsync((Video)owner, selected.Path, ct);
-            //  var subtitleTask = DownloadSubtitles((Video)owner, ct);
-
-            await Task.WhenAll(metadataTask, segmentTask).ConfigureAwait(false);
-
-            await owner
-                .UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, ct)
+                        await Task.WhenAll(metadataTask, segmentTask).ConfigureAwait(false);
+                        await owner
+                            .UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, probeCt)
+                            .ConfigureAwait(false);
+                    },
+                    ct
+                )
                 .ConfigureAwait(false);
 
             var refreshed = GetStaticMediaSources(item, enablePathSubstitution, user);
@@ -389,7 +446,10 @@ public sealed class MediaSourceManagerDecorator(
 
         // Stub path after probing is done so the real URL is never sent to clients.
         // Force File protocol so clients proxy through Jellyfin instead of direct-playing.
-        if (ctx.GetActionName() == "GetPostedPlaybackInfo")
+        if (
+            ctx.GetActionName() == "GetPostedPlaybackInfo"
+            && MediaSourcePlaybackPolicy.ShouldStub(ownerIsGelato)
+        )
         {
             selected.Path = "/stub";
             selected.IsRemote = false;
@@ -648,6 +708,12 @@ public sealed class MediaSourceManagerDecorator(
 
     private async Task ProbeStreamAsync(Video owner, string streamUrl, CancellationToken ct)
     {
+        if (!StreamUrlPolicy.IsSupportedRemoteStreamUrl(streamUrl))
+        {
+            _log.LogWarning("Skipping stream probe for {Id}: unsupported stream URL", owner.Id);
+            return;
+        }
+
         var gelatoFilename = owner.GelatoData<string>("filename");
         var strmBaseName = !string.IsNullOrEmpty(gelatoFilename)
             ? Path.GetFileNameWithoutExtension(gelatoFilename)

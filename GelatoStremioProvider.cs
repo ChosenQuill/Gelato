@@ -857,13 +857,7 @@ public class StremioStream
 
     public bool IsValid()
     {
-        if (string.IsNullOrWhiteSpace(Url))
-            return false;
-
-        if (!Uri.TryCreate(Url, UriKind.Absolute, out var uri))
-            return false;
-
-        return !(uri.PathAndQuery == "/" || string.IsNullOrEmpty(uri.PathAndQuery));
+        return StreamUrlPolicy.IsSupportedRemoteStreamUrl(Url);
     }
 
     public bool IsFile()
