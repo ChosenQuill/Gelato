@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using Gelato.Config;
 using Gelato.Decorators;
 using Gelato.Providers;
@@ -66,6 +67,139 @@ public sealed class MediaSourceManagerDecoratorTests
             .DidNotReceiveWithAnyArgs()
             .GetItemList(default!);
         Assert.Empty(harness.SegmentManager.ReceivedCalls());
+    }
+
+    [Fact]
+    public async Task MixedDisabledLocalMovieWithNullHlsUserDelegatesUsingAuthenticatedClaim()
+    {
+        var item = LocalMovie();
+        var requestUserId = Guid.NewGuid();
+        Guid? resolvedUserId = null;
+        var expected = new List<MediaSourceInfo> { LocalSource(item) };
+        var inner = Substitute.For<IMediaSourceManager>();
+        inner
+            .GetPlaybackMediaSources(item, null!, false, false, CancellationToken.None)
+            .Returns(Task.FromResult<IReadOnlyList<MediaSourceInfo>>(expected));
+
+        var harness = CreateHarness(
+            inner,
+            new PluginConfiguration { EnableMixed = false },
+            authenticatedUserId: requestUserId,
+            configResolver: userId =>
+            {
+                resolvedUserId = userId;
+                return new PluginConfiguration { EnableMixed = false };
+            }
+        );
+
+        var actual = await harness.Decorator.GetPlaybackMediaSources(
+            item,
+            null!,
+            false,
+            false,
+            CancellationToken.None
+        );
+
+        Assert.Same(expected, actual);
+        Assert.Equal(requestUserId, resolvedUserId);
+        await inner
+            .Received(1)
+            .GetPlaybackMediaSources(item, null!, false, false, CancellationToken.None);
+        inner
+            .DidNotReceive()
+            .GetStaticMediaSources(item, Arg.Any<bool>(), Arg.Any<User?>());
+        Assert.Empty(harness.SegmentManager.ReceivedCalls());
+    }
+
+    [Fact]
+    public async Task NullHlsUserIgnoresConflictingQueryIdentity()
+    {
+        var item = LocalMovie();
+        var authenticatedUserId = Guid.NewGuid();
+        var queryUserId = Guid.NewGuid();
+        Guid? resolvedUserId = null;
+        var expected = new List<MediaSourceInfo> { LocalSource(item) };
+        var inner = Substitute.For<IMediaSourceManager>();
+        inner
+            .GetPlaybackMediaSources(item, null!, false, false, CancellationToken.None)
+            .Returns(Task.FromResult<IReadOnlyList<MediaSourceInfo>>(expected));
+
+        var harness = CreateHarness(
+            inner,
+            new PluginConfiguration { EnableMixed = false },
+            authenticatedUserId: authenticatedUserId,
+            queryUserId: queryUserId,
+            configResolver: userId =>
+            {
+                resolvedUserId = userId;
+                return new PluginConfiguration { EnableMixed = false };
+            }
+        );
+
+        var actual = await harness.Decorator.GetPlaybackMediaSources(
+            item,
+            null!,
+            false,
+            false,
+            CancellationToken.None
+        );
+
+        Assert.Same(expected, actual);
+        Assert.Equal(authenticatedUserId, resolvedUserId);
+        Assert.NotEqual(queryUserId, resolvedUserId);
+    }
+
+    [Fact]
+    public async Task NullHlsUserWithoutAuthenticatedIdentityDelegatesLocalAndRejectsGelato()
+    {
+        var local = LocalMovie();
+        var gelato = new Movie
+        {
+            Id = Guid.NewGuid(),
+            Name = "Gelato movie",
+            Path = "gelato://stub/tt1234567",
+        };
+        gelato.ProviderIds["Stremio"] = "tt1234567";
+        var expectedLocal = new List<MediaSourceInfo> { LocalSource(local) };
+        var inner = Substitute.For<IMediaSourceManager>();
+        inner
+            .GetPlaybackMediaSources(local, null!, false, false, CancellationToken.None)
+            .Returns(Task.FromResult<IReadOnlyList<MediaSourceInfo>>(expectedLocal));
+        var configResolved = false;
+        var harness = CreateHarness(
+            inner,
+            new PluginConfiguration { EnableMixed = false },
+            configResolver: _ =>
+            {
+                configResolved = true;
+                return new PluginConfiguration { EnableMixed = false };
+            }
+        );
+
+        var localSources = await harness.Decorator.GetPlaybackMediaSources(
+            local,
+            null!,
+            false,
+            false,
+            CancellationToken.None
+        );
+        var gelatoSources = await harness.Decorator.GetPlaybackMediaSources(
+            gelato,
+            null!,
+            false,
+            false,
+            CancellationToken.None
+        );
+
+        Assert.Same(expectedLocal, localSources);
+        Assert.Empty(gelatoSources);
+        Assert.False(configResolved);
+        await inner
+            .Received(1)
+            .GetPlaybackMediaSources(local, null!, false, false, CancellationToken.None);
+        await inner
+            .DidNotReceive()
+            .GetPlaybackMediaSources(gelato, null!, false, false, CancellationToken.None);
     }
 
     [Fact]
@@ -189,14 +323,124 @@ public sealed class MediaSourceManagerDecoratorTests
         Assert.Empty(harness.SegmentManager.ReceivedCalls());
     }
 
+    [Fact]
+    public async Task GelatoRemoteSelectionWithNullHlsUserUsesAuthenticatedClaim()
+    {
+        var requestUserId = Guid.NewGuid();
+        Guid? resolvedUserId = null;
+        var item = new Movie
+        {
+            Id = Guid.NewGuid(),
+            Name = "Gelato movie",
+            Path = "gelato://stub/tt1234567",
+            RunTimeTicks = TimeSpan.FromMinutes(90).Ticks,
+        };
+        item.ProviderIds["Stremio"] = "tt1234567";
+        var remote = new Movie
+        {
+            Id = Guid.NewGuid(),
+            Name = item.Name,
+            Path = "https://example.test/video.mkv",
+            RunTimeTicks = item.RunTimeTicks,
+            Tags = [GelatoManager.StreamTag],
+        };
+        remote.ProviderIds["Stremio"] = "tt1234567";
+        remote.SetGelatoData("userIds", new List<Guid> { requestUserId });
+        remote.SetGelatoData("name", "Remote source");
+
+        var inner = Substitute.For<IMediaSourceManager>();
+        inner
+            .GetStaticMediaSources(item, false, null)
+            .Returns(new List<MediaSourceInfo>
+            {
+                new()
+                {
+                    Id = item.Id.ToString("N"),
+                    ETag = item.Id.ToString("N"),
+                    Path = item.Path,
+                    Protocol = MediaProtocol.File,
+                },
+            });
+        inner
+            .GetMediaStreams(remote.Id)
+            .Returns(new List<MediaStream>
+            {
+                new()
+                {
+                    Type = MediaStreamType.Video,
+                    Index = 0,
+                },
+            });
+        inner.GetMediaAttachments(remote.Id).Returns(Array.Empty<MediaAttachment>());
+
+        var harness = CreateHarness(
+            inner,
+            new PluginConfiguration { EnableMixed = false },
+            authenticatedUserId: requestUserId,
+            configResolver: userId =>
+            {
+                resolvedUserId = userId;
+                return new PluginConfiguration { EnableMixed = false };
+            }
+        );
+        harness.RepositoryInner
+            .GetItemList(Arg.Any<InternalItemsQuery>())
+            .Returns(new List<BaseItem> { remote });
+        harness.LibraryManager.GetItemById(remote.Id).Returns(remote);
+
+        var actual = await harness.Decorator.GetPlaybackMediaSources(
+            item,
+            null!,
+            allowMediaProbe: false,
+            enablePathSubstitution: false,
+            CancellationToken.None
+        );
+
+        var selected = Assert.Single(actual);
+        Assert.Equal(requestUserId, resolvedUserId);
+        Assert.Equal(remote.Path, selected.Path);
+        Assert.Equal(remote.Id.ToString("N"), selected.ETag);
+        await inner
+            .DidNotReceiveWithAnyArgs()
+            .GetPlaybackMediaSources(default!, default!, default, default, default);
+        Assert.Empty(harness.SegmentManager.ReceivedCalls());
+    }
+
     private static Harness CreateHarness(
         IMediaSourceManager inner,
         PluginConfiguration configuration,
-        Lazy<GelatoManager>? manager = null
+        Lazy<GelatoManager>? manager = null,
+        Guid? authenticatedUserId = null,
+        Guid? queryUserId = null,
+        Func<Guid, PluginConfiguration>? configResolver = null
     )
     {
         var http = Substitute.For<IHttpContextAccessor>();
-        http.HttpContext.Returns(new DefaultHttpContext());
+        var httpContext = new DefaultHttpContext();
+        if (authenticatedUserId.HasValue)
+        {
+            httpContext.User = new ClaimsPrincipal(
+                new ClaimsIdentity(
+                    [
+                        new Claim(
+                            "Jellyfin-UserId",
+                            authenticatedUserId.Value.ToString()
+                        ),
+                    ],
+                    "Jellyfin"
+                )
+            );
+        }
+
+        if (queryUserId.HasValue)
+        {
+            httpContext.Request.QueryString = QueryString.Create(
+                "userId",
+                queryUserId.Value.ToString()
+            );
+        }
+
+        http.HttpContext.Returns(httpContext);
         var repositoryInner = Substitute.For<IItemRepository>();
         var repository = new GelatoItemRepository(repositoryInner, http);
         var libraryManager = Substitute.For<ILibraryManager>();
@@ -232,7 +476,7 @@ public sealed class MediaSourceManagerDecoratorTests
             ),
             segmentManager,
             Array.Empty<ICustomMetadataProvider<Video>>(),
-            _ => configuration
+            configResolver ?? (_ => configuration)
         );
 
         return new Harness(decorator, repositoryInner, segmentManager, libraryManager);

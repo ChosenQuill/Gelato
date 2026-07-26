@@ -78,27 +78,23 @@ public sealed class MediaSourceManagerDecorator(
         User? user = null
     )
     {
-        var manager = _manager.Value;
         _log.LogDebug("GetStaticMediaSources {Id}", item.Id);
         var ctx = _http.HttpContext;
-        Guid userId;
-        if (user != null)
+        var userId = ResolveUserId(user);
+        var isGelatoItem = MediaSourcePlaybackPolicy.IsGelatoOwnedItem(
+            item.HasStreamTag(),
+            item.Path
+        );
+        if (user is null && userId == Guid.Empty)
         {
-            userId = user.Id;
-        }
-        else
-        {
-            ctx.TryGetUserId(out userId);
+            return _inner.GetStaticMediaSources(item, enablePathSubstitution, user);
         }
 
         var cfg = _configResolver(userId);
         if (
             (
                 !cfg.EnableMixed
-                && !MediaSourcePlaybackPolicy.IsGelatoOwnedItem(
-                    item.HasStreamTag(),
-                    item.Path
-                )
+                && !isGelatoItem
             )
             || item.GetBaseItemKind() is not (BaseItemKind.Movie or BaseItemKind.Episode)
         )
@@ -106,6 +102,7 @@ public sealed class MediaSourceManagerDecorator(
             return _inner.GetStaticMediaSources(item, enablePathSubstitution, user);
         }
 
+        var manager = _manager.Value;
         var uri = StremioUri.FromBaseItem(item);
         var actionName =
             ctx?.Items.TryGetValue("actionName", out var ao) == true ? ao as string : null;
@@ -315,7 +312,7 @@ public sealed class MediaSourceManagerDecorator(
 
     public async Task<IReadOnlyList<MediaSourceInfo>> GetPlaybackMediaSources(
         BaseItem item,
-        User user,
+        User? user,
         bool allowMediaProbe,
         bool enablePathSubstitution,
         CancellationToken ct
@@ -333,7 +330,26 @@ public sealed class MediaSourceManagerDecorator(
             item.HasStreamTag(),
             item.Path
         );
-        var cfg = _configResolver(user.Id);
+        var userId = ResolveUserId(user);
+        if (user is null && userId == Guid.Empty)
+        {
+            if (!isGelatoItem)
+            {
+                return await _inner
+                    .GetPlaybackMediaSources(
+                        item,
+                        user,
+                        allowMediaProbe,
+                        enablePathSubstitution,
+                        ct
+                    )
+                    .ConfigureAwait(false);
+            }
+
+            return Array.Empty<MediaSourceInfo>();
+        }
+
+        var cfg = _configResolver(userId);
         if (
             !MediaSourcePlaybackPolicy.ShouldHandlePlayback(
                 itemKind,
@@ -476,6 +492,27 @@ public sealed class MediaSourceManagerDecorator(
 
         BaseItem ResolveOwnerFor(MediaSourceInfo s, BaseItem fallback) =>
             Guid.TryParse(s.ETag, out var g) ? libraryManager.GetItemById(g) ?? fallback : fallback;
+    }
+
+    private Guid ResolveUserId(User? user)
+    {
+        if (user is not null)
+        {
+            return user.Id;
+        }
+
+        var ctx = _http.HttpContext;
+        if (ctx?.User?.Identity?.IsAuthenticated != true)
+        {
+            return Guid.Empty;
+        }
+
+        var userIdValue = ctx.User.Claims
+            .FirstOrDefault(claim => claim.Type is "UserId" or "Jellyfin-UserId")
+            ?.Value;
+        return Guid.TryParse(userIdValue, out var userId) && userId != Guid.Empty
+            ? userId
+            : Guid.Empty;
     }
 
     public Task<MediaSourceInfo> GetMediaSource(
