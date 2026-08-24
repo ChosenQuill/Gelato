@@ -240,6 +240,8 @@ public static class ActionContextExtensions
 
     private static readonly string[] IdsGuidKeys = ["ids", "Ids", "IDs"];
 
+    private static readonly string[] RouteUserIdKeys = ["userId", "UserId", "UserID"];
+
     private static readonly HashSet<string> SearchActionNames = new(
         StringComparer.OrdinalIgnoreCase
     )
@@ -458,6 +460,22 @@ public static class ActionContextExtensions
         var userIdStr =
             ctx.User.Claims.FirstOrDefault(c => c.Type is "UserId" or "Jellyfin-UserId")?.Value
             ?? ctx.Request.Query["userId"].FirstOrDefault();
+
+        if (string.IsNullOrWhiteSpace(userIdStr))
+        {
+            foreach (var key in RouteUserIdKeys)
+            {
+                if (
+                    ctx.Request.RouteValues.TryGetValue(key, out var routeUserId)
+                    && routeUserId?.ToString() is { } value
+                    && !string.IsNullOrWhiteSpace(value)
+                )
+                {
+                    userIdStr = value;
+                    break;
+                }
+            }
+        }
 
         if (!Guid.TryParse(userIdStr, out userId))
             return false;
