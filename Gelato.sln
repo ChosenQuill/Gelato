@@ -4,6 +4,8 @@ VisualStudioVersion = 17.5.2.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Gelato", "Gelato.csproj", "{BD49D22F-CAE9-7FAF-32E5-4708975FD362}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Gelato.Tests", "Gelato.Tests\\Gelato.Tests.csproj", "{064C1E38-632A-4F26-A4E1-E6B2A682817A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -14,6 +16,10 @@ Global
 		{BD49D22F-CAE9-7FAF-32E5-4708975FD362}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{BD49D22F-CAE9-7FAF-32E5-4708975FD362}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{BD49D22F-CAE9-7FAF-32E5-4708975FD362}.Release|Any CPU.Build.0 = Release|Any CPU
+		{064C1E38-632A-4F26-A4E1-E6B2A682817A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{064C1E38-632A-4F26-A4E1-E6B2A682817A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{064C1E38-632A-4F26-A4E1-E6B2A682817A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{064C1E38-632A-4F26-A4E1-E6B2A682817A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -54,7 +54,17 @@ public class SearchActionFilter(
         ctx.TryGetActionArgument("startIndex", out var start, 0);
         ctx.TryGetActionArgument("limit", out var limit, 25);
 
-        var metas = await SearchMetasAsync(searchTerm, requestedTypes, cfg, userId);
+        var metas = await SearchOrFallBackToNativeAsync(
+            () => SearchMetasAsync(searchTerm, requestedTypes, cfg, userId),
+            async () => await next(),
+            reason =>
+                log.LogWarning(
+                    "Virtual search unavailable; continuing with native Jellyfin search ({Reason})",
+                    reason
+                )
+        );
+        if (metas is null)
+            return;
 
         log.LogInformation(
             "Intercepted /Items search \"{Query}\" types=[{Types}] start={Start} limit={Limit} results={Results}",
@@ -71,6 +81,33 @@ public class SearchActionFilter(
         ctx.Result = new OkObjectResult(
             new QueryResult<BaseItemDto> { Items = paged, TotalRecordCount = dtos.Count }
         );
+    }
+
+    private static async Task<List<StremioMeta>?> SearchOrFallBackToNativeAsync(
+        Func<Task<List<StremioMeta>>> virtualSearch,
+        Func<Task> nativeSearch,
+        Action<string> logFallback
+    )
+    {
+        try
+        {
+            return await virtualSearch();
+        }
+        catch (HttpRequestException)
+        {
+            logFallback("upstream-http");
+        }
+        catch (TaskCanceledException)
+        {
+            logFallback("upstream-timeout");
+        }
+        catch (TimeoutException)
+        {
+            logFallback("upstream-timeout");
+        }
+
+        await nativeSearch();
+        return null;
     }
 
     private HashSet<BaseItemKind> GetRequestedItemTypes(ActionExecutingContext ctx)
