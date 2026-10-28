@@ -613,7 +613,7 @@ public sealed class GelatoManager(
 
         if (toDelete.Count > 0)
         {
-            // Preserve the current no-op retirement until its regression is reproduced.
+            repository.DeleteItem([.. toDelete.Select(item => item.Id)]);
         }
 
         if (toSave.Count > 0)

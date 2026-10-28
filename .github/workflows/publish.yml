@@ -27,8 +27,8 @@ jobs:
       - name: Prepare GitHub Release assets
         run: |-
           for file in ./*; do
-            md5sum ${file#./} >> ${file%.*}.md5
-            sha256sum ${file#./} >> ${file%.*}.sha256
+            md5sum "${file#./}" >> "${file%.*}.md5"
+            sha256sum "${file#./}" >> "${file%.*}.sha256"
           done
           ls -l
       - name: Upload GitHub Release assets
@@ -36,13 +36,3 @@ jobs:
         with:
           upload_url: ${{ github.event.release.upload_url }}
           asset_path: ./*
-  generate:
-    runs-on: ubuntu-latest
-    needs:
-      - upload
-    steps:
-      - name: Jellyfin plugin repo
-        uses: Kevinjil/jellyfin-plugin-repo-action@v0.4.3
-        with:
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
