@@ -452,7 +452,7 @@ public sealed class GelatoManager(
 
         var existingStreamItems = repo.GetItemList(query)
             .OfType<Video>()
-            .Where(v => v.IsStream())
+            .Where(v => IsStreamForAssociation(v, uri.ExternalId))
             .ToList();
 
         // Match stream rows by persisted Gelato guid, not by volatile playback URL/path.
@@ -566,12 +566,38 @@ public sealed class GelatoManager(
         repo.SaveItems(upsertedStreams, ct);
 
         var newIds = new HashSet<Guid>(upsertedStreams.Select(x => x.Id));
-        var stale = existingByGuid
-            .Values.Where(m =>
-                !newIds.Contains(m.Id)
-                && (m.GelatoData<List<Guid>>("userIds")?.Contains(userId) ?? false)
-            )
-            .ToList();
+        RetireStaleStreams(existingStreamItems, newIds, uri.ExternalId, userId, repo, ct);
+        upsertedStreams.Add(video);
+
+        stopwatch.Stop();
+
+        _log.LogInformation(
+            $"SyncStreams finished GelatoId={uri.ExternalId} userId={userId} duration={Math.Round(stopwatch.Elapsed.TotalSeconds, 1)}s streams={upsertedStreams.Count}"
+        );
+
+        return acceptable.Count;
+    }
+
+    private static bool IsStreamForAssociation(Video item, string association)
+    {
+        return item.HasStreamTag()
+            && string.Equals(item.GetProviderId("Stremio"), association, StringComparison.Ordinal);
+    }
+
+    private static void RetireStaleStreams(
+        IEnumerable<Video> existingStreams,
+        IReadOnlySet<Guid> currentIds,
+        string association,
+        Guid userId,
+        GelatoItemRepository repository,
+        CancellationToken ct
+    )
+    {
+        var stale = existingStreams.Where(item =>
+            IsStreamForAssociation(item, association)
+            && !currentIds.Contains(item.Id)
+            && (item.GelatoData<List<Guid>>("userIds")?.Contains(userId) ?? false)
+        ).ToList();
 
         foreach (var _item in stale)
         {
@@ -585,32 +611,15 @@ public sealed class GelatoManager(
             .ToList();
         var toSave = stale.Except(toDelete).ToList();
 
-        try
+        if (toDelete.Count > 0)
         {
-            //repo.DeleteItem([.. toDelete.Select(f => f.Id)]);
-        }
-        catch
-        {
-            foreach (var staleItem in toDelete)
-            {
-                libraryManager.DeleteItem(
-                    staleItem,
-                    new DeleteOptions { DeleteFileLocation = true },
-                    true
-                );
-            }
+            // Preserve the current no-op retirement until its regression is reproduced.
         }
 
-        repo.SaveItems(toSave, ct);
-        upsertedStreams.Add(video);
-
-        stopwatch.Stop();
-
-        _log.LogInformation(
-            $"SyncStreams finished GelatoId={uri.ExternalId} userId={userId} duration={Math.Round(stopwatch.Elapsed.TotalSeconds, 1)}s streams={upsertedStreams.Count}"
-        );
-
-        return acceptable.Count;
+        if (toSave.Count > 0)
+        {
+            repository.SaveItems(toSave, ct);
+        }
     }
 
     /// <summary>
