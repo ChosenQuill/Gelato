@@ -533,8 +533,7 @@ public sealed class GelatoManager(
             streamItem.LinkedAlternateVersions = [];
             streamItem.SetPrimaryVersionId(null);
             streamItem.PremiereDate = video.PremiereDate;
-            streamItem.Path = path;
-            streamItem.IsVirtualItem = false;
+            SetCanonicalStreamPath(streamItem, path);
             streamItem.SetParent(parent);
 
             var users = streamItem.GelatoData<List<Guid>>("userIds") ?? [];
@@ -576,6 +575,12 @@ public sealed class GelatoManager(
         );
 
         return acceptable.Count;
+    }
+
+    private static void SetCanonicalStreamPath(Video streamItem, string path)
+    {
+        streamItem.Path = path;
+        streamItem.IsVirtualItem = false;
     }
 
     private static bool IsStreamForAssociation(Video item, string association)

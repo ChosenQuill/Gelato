@@ -110,6 +110,38 @@ public class StreamRetirementTests
         Assert.Equal(0, fixture.Backend.SaveCalls);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SyncedStreamRepairsPersistedShortcutStateWithoutLosingUsersOrMetadata(bool episode)
+    {
+        using var fixture = new RepositoryFixture();
+        var users = new List<Guid> { Guid.NewGuid(), Guid.NewGuid() };
+        var corrupted = Stream("test-item", users, episode);
+        corrupted.Path = "/tmp/old-probe.strm";
+        corrupted.IsShortcut = true;
+        corrupted.ShortcutPath = "https://provider.example.invalid/expired-stream";
+        corrupted.IsVirtualItem = true;
+        fixture.Seed(corrupted);
+        var owned = Assert.IsAssignableFrom<Video>(fixture.Reload().RetrieveItem(corrupted.Id));
+        var method = typeof(GelatoManager).GetMethod("SetCanonicalStreamPath", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+
+        method!.Invoke(null, [owned, "https://provider.example.invalid/current-stream.mkv"]);
+        fixture.Repository.SaveItems([owned], CancellationToken.None);
+
+        var reloaded = Assert.IsAssignableFrom<Video>(fixture.Reload().RetrieveItem(corrupted.Id));
+        Assert.NotSame(owned, reloaded);
+        Assert.Equal("https://provider.example.invalid/current-stream.mkv", reloaded.Path);
+        Assert.False(reloaded.IsShortcut);
+        Assert.True(string.IsNullOrEmpty(reloaded.ShortcutPath));
+        Assert.False(reloaded.IsVirtualItem);
+        Assert.Equal(corrupted.ExternalId, reloaded.ExternalId);
+        Assert.Equal(corrupted.ProviderIds, reloaded.ProviderIds);
+        Assert.Equal(corrupted.Tags, reloaded.Tags);
+        Assert.Equal(users, reloaded.GelatoData<List<Guid>>("userIds"));
+    }
+
     private static Video Stream(string association, List<Guid> users, bool episode = false)
     {
         Video item = episode ? new Episode() : new Movie();
@@ -192,7 +224,7 @@ public class StreamRetirementTests
                     foreach (var item in (IReadOnlyList<BaseItem>)args![0]!)
                     {
                         rows[item.Id] = new PersistedVideo(item.Id, item is Episode, item.Path,
-                            item.Tags, item.ProviderIds, item.ExternalId, item.IsVirtualItem);
+                            item.Tags, item.ProviderIds, item.ExternalId, item.IsVirtualItem, item.IsShortcut, item.ShortcutPath);
                     }
                     File.WriteAllText(StorePath, JsonSerializer.Serialize(rows));
                     return null;
@@ -215,7 +247,7 @@ public class StreamRetirementTests
     }
 
     public record PersistedVideo(Guid Id, bool IsEpisode, string Path, string[] Tags,
-        Dictionary<string, string> ProviderIds, string? ExternalId, bool Virtual)
+        Dictionary<string, string> ProviderIds, string? ExternalId, bool Virtual, bool IsShortcut, string? ShortcutPath)
     {
         public Video Reload()
         {
@@ -226,6 +258,8 @@ public class StreamRetirementTests
             item.ProviderIds = ProviderIds;
             item.ExternalId = ExternalId;
             item.IsVirtualItem = Virtual;
+            item.IsShortcut = IsShortcut;
+            item.ShortcutPath = ShortcutPath;
             return item;
         }
     }
