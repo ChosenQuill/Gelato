@@ -427,15 +427,15 @@ public sealed class MediaSourceManagerDecorator(
                 ) ?? list.FirstOrDefault();
         }
 
-        static bool NeedsProbe(MediaSourceInfo s) =>
-            string.IsNullOrWhiteSpace(s.Container)
-            || (s.MediaStreams?.All(ms => ms.Type != MediaStreamType.Video) ?? true)
-            || (s.RunTimeTicks ?? 0) < TimeSpan.FromMinutes(2).Ticks;
-
         BaseItem ResolveOwnerFor(MediaSourceInfo s, BaseItem fallback) =>
             // SyncStreams may have repaired this row while ILibraryManager still holds an old instance.
             Guid.TryParse(s.ETag, out var g) ? repo.RetrieveItem(g) ?? fallback : fallback;
     }
+
+    private static bool NeedsProbe(MediaSourceInfo source) =>
+        string.IsNullOrWhiteSpace(source.Container)
+        || (source.MediaStreams?.All(stream => stream.Type != MediaStreamType.Video) ?? true)
+        || (source.RunTimeTicks ?? 0) < TimeSpan.FromMinutes(2).Ticks;
 
     private static async Task<MediaSourceInfo?> PrepareSelectedSourceAsync(
         MediaSourceInfo? selected,
