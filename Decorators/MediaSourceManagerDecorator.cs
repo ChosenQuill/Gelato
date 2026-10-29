@@ -435,7 +435,7 @@ public sealed class MediaSourceManagerDecorator(
     private static bool NeedsProbe(MediaSourceInfo source) =>
         string.IsNullOrWhiteSpace(source.Container)
         || (source.MediaStreams?.All(stream => stream.Type != MediaStreamType.Video) ?? true)
-        || (source.RunTimeTicks ?? 0) < TimeSpan.FromMinutes(2).Ticks;
+        || (source.RunTimeTicks ?? 0) <= 0;
 
     private static async Task<MediaSourceInfo?> PrepareSelectedSourceAsync(
         MediaSourceInfo? selected,
