@@ -666,7 +666,16 @@ public sealed class MediaSourceManagerDecorator(
         return streams;
     }
 
-    private async Task ProbeStreamAsync(Video owner, string streamUrl, CancellationToken ct)
+    private Task ProbeStreamAsync(Video owner, string streamUrl, CancellationToken ct) =>
+        ProbeStreamAsync(owner, streamUrl,
+            (video, options, token) => video.RefreshMetadata(options, token), ct);
+
+    private async Task ProbeStreamAsync(
+        Video owner,
+        string streamUrl,
+        Func<Video, MetadataRefreshOptions, CancellationToken, Task> fetchMetadata,
+        CancellationToken ct
+    )
     {
         var gelatoFilename = owner.GelatoData<string>("filename");
         var strmBaseName = !string.IsNullOrEmpty(gelatoFilename)
@@ -684,7 +693,8 @@ public sealed class MediaSourceManagerDecorator(
         try
         {
             _log.LogInformation("Probing stream for {Id} via {Url}", owner.Id, streamUrl);
-            await owner.RefreshMetadata(
+            await fetchMetadata(
+                owner,
                 new MetadataRefreshOptions(directoryService)
                 {
                     EnableRemoteContentProbe = true,
