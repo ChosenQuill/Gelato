@@ -11,6 +11,7 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
@@ -349,10 +350,7 @@ public sealed class MediaSourceManagerDecorator(
         );
 
         var selected = SelectByIdOrFirst(sources, mediaSourceId);
-        if (selected is null)
-            return sources;
-
-        var owner = ResolveOwnerFor(selected, item);
+        var owner = selected is null ? item : ResolveOwnerFor(selected, item);
         if (!IsGelatoPlaybackItem(owner))
         {
             return await _inner
@@ -364,8 +362,6 @@ public sealed class MediaSourceManagerDecorator(
         {
             sources = GetStaticMediaSources(owner, enablePathSubstitution, user);
             selected = SelectByIdOrFirst(sources, mediaSourceId);
-            if (selected is null)
-                return sources;
         }
 
         selected = await PrepareSelectedSourceAsync(selected, ctx.GetActionName(), async candidate =>
@@ -447,7 +443,19 @@ public sealed class MediaSourceManagerDecorator(
         Func<MediaSourceInfo, Task<MediaSourceInfo>> prepare
     )
     {
-        return await prepare(selected!).ConfigureAwait(false);
+        if (selected is null
+            || !Uri.TryCreate(selected.Path, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            // PlaybackInfo translates an empty list to NoCompatibleStream. The native
+            // streaming helper indexes source zero, so it needs a typed 404 instead.
+            if (actionName is "GetPlaybackInfo" or "GetPostedPlaybackInfo")
+                return null;
+
+            throw new ResourceNotFoundException("No playable source is currently available.");
+        }
+
+        return await prepare(selected).ConfigureAwait(false);
     }
 
     private static bool IsGelatoPlaybackItem(BaseItem item) =>
