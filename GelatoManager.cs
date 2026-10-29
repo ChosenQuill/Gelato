@@ -581,6 +581,8 @@ public sealed class GelatoManager(
     {
         streamItem.Path = path;
         streamItem.IsVirtualItem = false;
+        streamItem.IsShortcut = false;
+        streamItem.ShortcutPath = string.Empty;
     }
 
     private static bool IsStreamForAssociation(Video item, string association)

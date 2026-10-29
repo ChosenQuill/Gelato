@@ -90,6 +90,8 @@ public class ServiceRegistrator : IPluginServiceRegistrator
             .DecorateSingle<ISubtitleManager, SubtitleManagerDecorator>()
             .DecorateSingle<IProviderManager, ProviderManagerDecorator>()
             .DecorateSingle<IImageProcessor, ImageProcessorDecorator>();
+        services.AddSingleton(sp => new Lazy<IProviderManager>(
+            sp.GetRequiredService<IProviderManager>));
         // Expose the concrete decorator as Lazy so ImageProcessorDecorator can call SaveImageDirect
         // without introducing a circular dependency at construction time.
         services.AddSingleton(sp => new Lazy<ProviderManagerDecorator>(

@@ -44,7 +44,7 @@ public sealed class MediaSourceManagerDecorator(
     Lazy<GelatoManager> manager,
     Lazy<SubtitleProvider> subtitleProvider,
     IMediaSegmentManager mediaSegmentManager,
-    IEnumerable<ICustomMetadataProvider<Video>> videoProbeProviders
+    Lazy<IProviderManager> providerManager
 ) : IMediaSourceManager
 {
     private readonly IMediaSourceManager _inner =
@@ -64,8 +64,6 @@ public sealed class MediaSourceManagerDecorator(
     private readonly Lazy<SubtitleProvider> _subtitleProvider = subtitleProvider;
 
     //  private readonly Lazy<ISubtitleManager> _subtitleManager = subtitleManager ?? throw new ArgumentNullException(nameof(subtitleManager));
-    private readonly ICustomMetadataProvider<Video>? _probeProvider =
-        videoProbeProviders.FirstOrDefault(p => p.Name == "Probe Provider");
 
     public IReadOnlyList<MediaSourceInfo> GetStaticMediaSources(
         BaseItem item,
@@ -380,7 +378,7 @@ public sealed class MediaSourceManagerDecorator(
                 false,
                 ct
             );
-            var metadataTask = ProbeStreamAsync((Video)owner, selected.Path, ct);
+            var metadataTask = ProbeStreamAsync((Video)owner, ct);
             //  var subtitleTask = DownloadSubtitles((Video)owner, ct);
 
             await Task.WhenAll(metadataTask, segmentTask).ConfigureAwait(false);
@@ -392,8 +390,8 @@ public sealed class MediaSourceManagerDecorator(
             var refreshed = GetStaticMediaSources(item, enablePathSubstitution, user);
             selected = SelectByIdOrFirst(refreshed, mediaSourceId);
 
-            if (selected is null)
-                return refreshed;
+            if (selected is null || NeedsProbe(selected))
+                throw new InvalidOperationException("Stream probe returned incomplete playback metadata.");
         }
 
         if (item.RunTimeTicks is null && selected.RunTimeTicks is not null)
@@ -427,11 +425,13 @@ public sealed class MediaSourceManagerDecorator(
         }
 
         static bool NeedsProbe(MediaSourceInfo s) =>
-            (s.MediaStreams?.All(ms => ms.Type != MediaStreamType.Video) ?? true)
+            string.IsNullOrWhiteSpace(s.Container)
+            || (s.MediaStreams?.All(ms => ms.Type != MediaStreamType.Video) ?? true)
             || (s.RunTimeTicks ?? 0) < TimeSpan.FromMinutes(2).Ticks;
 
         BaseItem ResolveOwnerFor(MediaSourceInfo s, BaseItem fallback) =>
-            Guid.TryParse(s.ETag, out var g) ? libraryManager.GetItemById(g) ?? fallback : fallback;
+            // SyncStreams may have repaired this row while ILibraryManager still holds an old instance.
+            Guid.TryParse(s.ETag, out var g) ? repo.RetrieveItem(g) ?? fallback : fallback;
     }
 
     private static bool IsGelatoPlaybackItem(BaseItem item) =>
@@ -666,58 +666,46 @@ public sealed class MediaSourceManagerDecorator(
         return streams;
     }
 
-    private Task ProbeStreamAsync(Video owner, string streamUrl, CancellationToken ct) =>
-        ProbeStreamAsync(owner, streamUrl,
-            (video, options, token) => video.RefreshMetadata(options, token), ct);
+    private Task ProbeStreamAsync(Video owner, CancellationToken ct)
+    {
+        // Jellyfin registers the video probe through IProviderManager, not the DI enumerable.
+        // Resolve lazily because ProbeProvider itself depends on IMediaSourceManager.
+        var libraryOptions = _libraryManager.GetLibraryOptions(owner);
+        var probeProvider = providerManager.Value
+            .GetMetadataProviders<Video>(owner, libraryOptions)
+            .OfType<ICustomMetadataProvider<Video>>()
+            .FirstOrDefault(provider => provider.Name == "Probe Provider")
+            ?? throw new InvalidOperationException("Jellyfin video probe provider is unavailable.");
+
+        return ProbeStreamAsync(owner,
+            (video, options, token) => probeProvider.FetchAsync(video, options, token), ct);
+    }
 
     private async Task ProbeStreamAsync(
         Video owner,
-        string streamUrl,
         Func<Video, MetadataRefreshOptions, CancellationToken, Task> fetchMetadata,
         CancellationToken ct
     )
     {
-        var gelatoFilename = owner.GelatoData<string>("filename");
-        var strmBaseName = !string.IsNullOrEmpty(gelatoFilename)
-            ? Path.GetFileNameWithoutExtension(gelatoFilename)
-            : $"{owner.Id:N}";
-        var tmpStrm = Path.Combine(Path.GetTempPath(), $"{strmBaseName}.strm");
-        await File.WriteAllTextAsync(tmpStrm, streamUrl, ct).ConfigureAwait(false);
-
-        var origPath = owner.Path;
-        var origShortcut = owner.IsShortcut;
-        owner.Path = tmpStrm;
-        owner.IsShortcut = true;
-        owner.DateModified = new FileInfo(tmpStrm).LastWriteTimeUtc;
-
-        try
+        if (!owner.HasStreamTag() || owner.IsShortcut
+            || !Uri.TryCreate(owner.Path, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
         {
-            _log.LogInformation("Probing stream for {Id} via {Url}", owner.Id, streamUrl);
-            await fetchMetadata(
-                owner,
-                new MetadataRefreshOptions(directoryService)
-                {
-                    EnableRemoteContentProbe = true,
-                    MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
-                },
-                ct
-            );
+            throw new InvalidOperationException("Selected Gelato stream has no canonical HTTP media path.");
         }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "Stream probe failed for {Id}", owner.Id);
-        }
-        finally
-        {
-            owner.Path = origPath;
-            owner.IsShortcut = origShortcut;
-            try
+
+        _log.LogInformation("Probing stream for {Id}", owner.Id);
+        // Jellyfin 10.11's ProbeProvider supports HTTP directly with remote probing enabled.
+        // Never turn the shared item into a temporary STRM while another request can read/save it.
+        await fetchMetadata(owner,
+            new MetadataRefreshOptions(directoryService)
             {
-                File.Delete(tmpStrm);
-            }
-            catch
-            { /* best effort */
-            }
-        }
+                EnableRemoteContentProbe = true,
+                MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+            }, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+
+        if (string.IsNullOrWhiteSpace(owner.Container))
+            throw new InvalidOperationException("Stream probe returned no container metadata.");
     }
 }
