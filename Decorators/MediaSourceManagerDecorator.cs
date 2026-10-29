@@ -368,31 +368,38 @@ public sealed class MediaSourceManagerDecorator(
                 return sources;
         }
 
-        if (NeedsProbe(selected))
+        selected = await PrepareSelectedSourceAsync(selected, ctx.GetActionName(), async candidate =>
         {
-            var libraryOptions = _libraryManager.GetLibraryOptions(owner);
+            if (NeedsProbe(candidate))
+            {
+                var libraryOptions = _libraryManager.GetLibraryOptions(owner);
 
-            var segmentTask = _mediaSegmentManager.RunSegmentPluginProviders(
-                owner,
-                libraryOptions,
-                false,
-                ct
-            );
-            var metadataTask = ProbeStreamAsync((Video)owner, ct);
-            //  var subtitleTask = DownloadSubtitles((Video)owner, ct);
+                var segmentTask = _mediaSegmentManager.RunSegmentPluginProviders(
+                    owner,
+                    libraryOptions,
+                    false,
+                    ct
+                );
+                var metadataTask = ProbeStreamAsync((Video)owner, ct);
+                //  var subtitleTask = DownloadSubtitles((Video)owner, ct);
 
-            await Task.WhenAll(metadataTask, segmentTask).ConfigureAwait(false);
+                await Task.WhenAll(metadataTask, segmentTask).ConfigureAwait(false);
 
-            await owner
-                .UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, ct)
-                .ConfigureAwait(false);
+                await owner
+                    .UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, ct)
+                    .ConfigureAwait(false);
 
-            var refreshed = GetStaticMediaSources(item, enablePathSubstitution, user);
-            selected = SelectByIdOrFirst(refreshed, mediaSourceId);
+                var refreshed = GetStaticMediaSources(item, enablePathSubstitution, user);
+                candidate = SelectByIdOrFirst(refreshed, mediaSourceId);
 
-            if (selected is null || NeedsProbe(selected))
-                throw new InvalidOperationException("Stream probe returned incomplete playback metadata.");
-        }
+                if (candidate is null || NeedsProbe(candidate))
+                    throw new InvalidOperationException("Stream probe returned incomplete playback metadata.");
+            }
+
+            return candidate;
+        }).ConfigureAwait(false);
+        if (selected is null)
+            return [];
 
         if (item.RunTimeTicks is null && selected.RunTimeTicks is not null)
         {
@@ -432,6 +439,15 @@ public sealed class MediaSourceManagerDecorator(
         BaseItem ResolveOwnerFor(MediaSourceInfo s, BaseItem fallback) =>
             // SyncStreams may have repaired this row while ILibraryManager still holds an old instance.
             Guid.TryParse(s.ETag, out var g) ? repo.RetrieveItem(g) ?? fallback : fallback;
+    }
+
+    private static async Task<MediaSourceInfo?> PrepareSelectedSourceAsync(
+        MediaSourceInfo? selected,
+        string? actionName,
+        Func<MediaSourceInfo, Task<MediaSourceInfo>> prepare
+    )
+    {
+        return await prepare(selected!).ConfigureAwait(false);
     }
 
     private static bool IsGelatoPlaybackItem(BaseItem item) =>
