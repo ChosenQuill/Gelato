@@ -37,7 +37,20 @@ public sealed class PlaybackInfoFilter : IAsyncActionFilter, IOrderedFilter
         )
         {
             if (!string.IsNullOrWhiteSpace(id))
+            {
+                // Some clients use the item ID as the default media source ID.
+                // Jellyfin accepts this only when it matches the resolved item.
+                if (ctx.HttpContext.Items["GuidRequested"] is Guid requestedId
+                    && ctx.HttpContext.Items["GuidResolved"] is Guid resolvedId
+                    && Guid.TryParse(id, out var sourceId)
+                    && sourceId == requestedId)
+                {
+                    id = resolvedId.ToString("N");
+                    ctx.ActionArguments["mediaSourceId"] = id;
+                }
+
                 ctx.HttpContext.Items[ItemsKey] = id;
+            }
         }
 
         await next();

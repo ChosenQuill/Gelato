@@ -285,6 +285,9 @@ public static class ActionContextExtensions
         "GetPlaybackInfo",
         "GetPostedPlaybackInfo",
         "GetVideoStream",
+        // Jellyfin routes the extension-qualified stream to a separate MVC action.
+        "GetVideoStreamByContainer",
+        "GetMasterHlsVideoPlaylist",
         "GetDownload",
         "GetSubtitleWithTicks",
     };
@@ -351,6 +354,12 @@ public static class ActionContextExtensions
 
     public static bool IsInsertableAction(this ActionExecutingContext ctx) =>
         ctx.HttpContext.IsInsertableAction();
+
+    public static bool IsHlsPlaybackContinuation(this ActionExecutingContext ctx) =>
+        ctx.GetActionName() is "GetVariantHlsVideoPlaylist" or "GetHlsVideoSegment";
+
+    public static bool IsPlaybackInfoAction(this string? actionName) =>
+        actionName is "GetPlaybackInfo" or "GetPostedPlaybackInfo";
 
     public static bool IsSingleItemList(this HttpContext ctx)
     {
@@ -422,7 +431,7 @@ public static class ActionContextExtensions
         return false;
     }
 
-    public static void ReplaceGuid(this ActionExecutingContext ctx, Guid value)
+    public static void ReplaceGuid(this ActionExecutingContext ctx, Guid requestedId, Guid value)
     {
         var rd = ctx.RouteData.Values;
 
@@ -443,6 +452,11 @@ public static class ActionContextExtensions
                 ctx.ActionArguments[key] = new[] { value };
                 break;
             }
+        }
+
+        if (requestedId != value)
+        {
+            ctx.HttpContext.Items["GuidRequested"] = requestedId;
         }
 
         ctx.HttpContext.Items["GuidResolved"] = value;

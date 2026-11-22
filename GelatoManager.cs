@@ -33,6 +33,7 @@ public sealed class GelatoManager(
 {
     public const string StreamTag = "gelato-stream";
     public const string TreeSyncedTag = "gelato-tree-synced";
+    private static readonly TimeSpan SearchItemLifetime = TimeSpan.FromHours(6);
 
     private readonly ILogger<GelatoManager> _log = loggerFactory.CreateLogger<GelatoManager>();
 
@@ -68,13 +69,26 @@ public sealed class GelatoManager(
 
     public void SaveStremioMeta(Guid guid, StremioMeta meta)
     {
-        memoryCache.Set($"meta:{guid}", meta, TimeSpan.FromMinutes(360));
+        memoryCache.Set($"meta:{guid}", meta, SearchItemLifetime);
     }
 
     public StremioMeta? GetStremioMeta(Guid guid)
     {
         return memoryCache.TryGetValue($"meta:{guid}", out var value) ? value as StremioMeta : null;
     }
+
+    internal void RememberInsertedId(Guid searchId, Guid itemId, Guid userId)
+    {
+        if (searchId != itemId)
+        {
+            memoryCache.Set($"inserted:{userId:N}:{searchId:N}", itemId, SearchItemLifetime);
+        }
+    }
+
+    internal Guid? GetInsertedId(Guid searchId, Guid userId) =>
+        memoryCache.TryGetValue($"inserted:{userId:N}:{searchId:N}", out Guid itemId)
+            ? itemId
+            : null;
 
     public void RemoveStremioMeta(Guid guid)
     {

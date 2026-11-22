@@ -1,5 +1,4 @@
 using Jellyfin.Data.Enums;
-using MediaBrowser.Model.MediaInfo;
 using Jellyfin.Database.Implementations.Entities; // User
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
@@ -46,9 +45,10 @@ public sealed class DtoServiceDecorator(IDtoService inner, Lazy<GelatoManager> m
         }
 
         var list = inner.GetBaseItemDtos(items, options, user, owner);
+        var itemsById = items.ToLookup(item => item.Id);
         foreach (var itemDto in list)
         {
-            Patch(itemDto, item, true, user);
+            Patch(itemDto, itemsById[itemDto.Id].FirstOrDefault(), true, user);
         }
         return list;
     }
@@ -86,38 +86,33 @@ public sealed class DtoServiceDecorator(IDtoService inner, Lazy<GelatoManager> m
 
         if (IsGelato(dto))
         {
-            if (dto.Path is not null && dto.Path.IsUrl())
-            {
-                // dto.Path = "/stub";
-
-
-            }
-
             dto.CanDownload = true;
-            // mark if placeholder
-            if (
-                isList
-                || dto.MediaSources?.Length != 1
-                || dto.Path is null
-                || !dto.MediaSources[0]
-                    .Path.StartsWith("gelato", StringComparison.OrdinalIgnoreCase)
-            )
+            if (!isList && dto.MediaSources?.Length == 1 && dto.Path is not null
+                && GelatoMediaSourceInfo.IsPlaceholderPath(dto.MediaSources[0].Path))
             {
-                if (dto.MediaSources != null)
-                {
-                    foreach (var source in dto.MediaSources)
-                    {
-                        //source.Path = "/stub";
-                        //source.IsRemote = false;
-                        // source.Protocol = MediaProtocol.File;
-                    }
-                }
-                return;
+                dto.LocationType = LocationType.Virtual;
+                dto.Path = null;
+                dto.CanDownload = false;
             }
+        }
 
-            dto.LocationType = LocationType.Virtual;
-            dto.Path = null;
-            dto.CanDownload = false;
+        MaskStreamPaths(dto, item?.HasStreamTag() == true);
+    }
+
+    private static void MaskStreamPaths(BaseItemDto dto, bool isGelatoStream)
+    {
+        if (isGelatoStream && dto.Path?.IsUrl() == true)
+        {
+            dto.Path = GelatoMediaSourceInfo.ClientPath;
+        }
+
+        foreach (var source in dto.MediaSources ?? [])
+        {
+            if ((source is GelatoMediaSourceInfo && source.Path?.IsUrl() == true)
+                || GelatoMediaSourceInfo.IsPlaceholderPath(source.Path))
+            {
+                GelatoMediaSourceInfo.RouteThroughJellyfin(source);
+            }
         }
     }
 }

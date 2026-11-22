@@ -22,12 +22,29 @@ public class InsertActionFilter(
         ActionExecutionDelegate next
     )
     {
+        var canInsert = ctx.IsInsertableAction();
         if (
-            !ctx.IsInsertableAction()
+            (!canInsert && !ctx.IsHlsPlaybackContinuation())
             || !ctx.TryGetRouteGuid(out var guid)
             || !ctx.TryGetUserId(out var userId)
             || userManager.GetUserById(userId) is not { } user
         )
+        {
+            await next();
+            return;
+        }
+
+        if (manager.GetInsertedId(guid, userId) is { } itemId
+            && libraryManager.GetItemById<BaseItem>(itemId, user) is not null)
+        {
+            ctx.ReplaceGuid(guid, itemId);
+            await next();
+            return;
+        }
+
+        // HLS child URLs are relative to the master and can still carry the
+        // search ID. They only resolve an alias already held by this user.
+        if (!canInsert)
         {
             await next();
             return;
@@ -68,7 +85,8 @@ public class InsertActionFilter(
                     "Media already exists; redirecting to canonical id {Id}",
                     existing.Id
                 );
-                ctx.ReplaceGuid(existing.Id);
+                manager.RememberInsertedId(guid, existing.Id, userId);
+                ctx.ReplaceGuid(guid, existing.Id);
                 await next();
                 return;
             }
@@ -95,8 +113,13 @@ public class InsertActionFilter(
         var baseItem = await InsertMetaAsync(guid, root, meta, user);
         if (baseItem is not null)
         {
-            ctx.ReplaceGuid(baseItem.Id);
-            manager.RemoveStremioMeta(guid);
+            manager.RememberInsertedId(guid, baseItem.Id, userId);
+            ctx.ReplaceGuid(guid, baseItem.Id);
+            // A different user may still need their own library's copy.
+            if (guid == baseItem.Id)
+            {
+                manager.RemoveStremioMeta(guid);
+            }
         }
 
         await next();

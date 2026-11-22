@@ -406,11 +406,9 @@ public sealed class MediaSourceManagerDecorator(
 
         // Stub path after probing is done so the real URL is never sent to clients.
         // Force File protocol so clients proxy through Jellyfin instead of direct-playing.
-        if (ctx.GetActionName() == "GetPostedPlaybackInfo")
+        if (ctx.GetActionName().IsPlaybackInfoAction())
         {
-            selected.Path = "/stub";
-            selected.IsRemote = false;
-            selected.Protocol = MediaProtocol.File;
+            GelatoMediaSourceInfo.RouteThroughJellyfin(selected);
         }
 
         return [selected];
@@ -449,7 +447,7 @@ public sealed class MediaSourceManagerDecorator(
         {
             // PlaybackInfo translates an empty list to NoCompatibleStream. The native
             // streaming helper indexes source zero, so it needs a typed 404 instead.
-            if (actionName is "GetPlaybackInfo" or "GetPostedPlaybackInfo")
+            if (actionName.IsPlaybackInfoAction())
                 return null;
 
             throw new ResourceNotFoundException("No playable source is currently available.");
@@ -555,7 +553,7 @@ public sealed class MediaSourceManagerDecorator(
             ? $"{streamName}\n{streamDesc}"
             : streamName;
 
-        var info = new MediaSourceInfo
+        var info = new GelatoMediaSourceInfo
         {
             Id = item.Id.ToString("N", CultureInfo.InvariantCulture),
             ETag = item.Id.ToString("N", CultureInfo.InvariantCulture),

@@ -12,6 +12,7 @@ public class PlaybackAvailabilityTests
     [Theory]
     [InlineData("GetVideoStream", false)]
     [InlineData("GetVideoStreamByContainer", false)]
+    [InlineData("GetMasterHlsVideoPlaylist", false)]
     [InlineData("GetPlaybackInfo", true)]
     [InlineData("GetPostedPlaybackInfo", true)]
     public async Task UnavailableSelectionUsesClientContractWithoutProbing(string action, bool playbackInfo)
