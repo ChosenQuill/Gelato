@@ -356,7 +356,14 @@ public static class ActionContextExtensions
         ctx.HttpContext.IsInsertableAction();
 
     public static bool IsHlsPlaybackContinuation(this ActionExecutingContext ctx) =>
-        ctx.GetActionName() is "GetVariantHlsVideoPlaylist" or "GetHlsVideoSegment";
+        ctx.GetActionName().IsHlsPlaybackContinuation();
+
+    private static bool IsHlsPlaybackContinuation(this string? actionName) =>
+        actionName is "GetVariantHlsVideoPlaylist" or "GetHlsVideoSegment";
+
+    internal static bool IsNativeVideoStreamAction(this string? actionName) =>
+        actionName is "GetVideoStream" or "GetVideoStreamByContainer" or "GetMasterHlsVideoPlaylist"
+        || actionName.IsHlsPlaybackContinuation();
 
     public static bool IsPlaybackInfoAction(this string? actionName) =>
         actionName is "GetPlaybackInfo" or "GetPostedPlaybackInfo";
@@ -454,12 +461,20 @@ public static class ActionContextExtensions
             }
         }
 
-        if (requestedId != value)
+        if (requestedId != value && ctx.HttpContext.TryGetAuthenticatedViewerId(out _))
         {
             ctx.HttpContext.Items["GuidRequested"] = requestedId;
         }
 
         ctx.HttpContext.Items["GuidResolved"] = value;
+    }
+
+    internal static bool TryGetAuthenticatedViewerId(this HttpContext? ctx, out Guid userId)
+    {
+        var claim = ctx?.User.Identities
+            .FirstOrDefault(identity => identity.IsAuthenticated)
+            ?.FindFirst("Jellyfin-UserId");
+        return Guid.TryParse(claim?.Value, out userId) && userId != Guid.Empty;
     }
 
     public static bool TryGetUserId(this ActionExecutingContext ctx, out Guid userId)

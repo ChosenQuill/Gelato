@@ -23,10 +23,13 @@ public class InsertActionFilter(
     )
     {
         var canInsert = ctx.IsInsertableAction();
+        var hasViewer = ctx.HttpContext.TryGetAuthenticatedViewerId(out var viewerId);
+        var userId = viewerId;
         if (
             (!canInsert && !ctx.IsHlsPlaybackContinuation())
             || !ctx.TryGetRouteGuid(out var guid)
-            || !ctx.TryGetUserId(out var userId)
+            || (!hasViewer && (ctx.GetActionName().IsNativeVideoStreamAction()
+                || !ctx.TryGetUserId(out userId)))
             || userManager.GetUserById(userId) is not { } user
         )
         {
@@ -34,7 +37,7 @@ public class InsertActionFilter(
             return;
         }
 
-        if (manager.GetInsertedId(guid, userId) is { } itemId
+        if (hasViewer && manager.GetInsertedId(guid, viewerId) is { } itemId
             && libraryManager.GetItemById<BaseItem>(itemId, user) is not null)
         {
             ctx.ReplaceGuid(guid, itemId);
@@ -85,7 +88,11 @@ public class InsertActionFilter(
                     "Media already exists; redirecting to canonical id {Id}",
                     existing.Id
                 );
-                manager.RememberInsertedId(guid, existing.Id, userId);
+                if (hasViewer)
+                {
+                    manager.RememberInsertedId(guid, existing.Id, viewerId);
+                }
+
                 ctx.ReplaceGuid(guid, existing.Id);
                 await next();
                 return;
@@ -113,7 +120,11 @@ public class InsertActionFilter(
         var baseItem = await InsertMetaAsync(guid, root, meta, user);
         if (baseItem is not null)
         {
-            manager.RememberInsertedId(guid, baseItem.Id, userId);
+            if (hasViewer)
+            {
+                manager.RememberInsertedId(guid, baseItem.Id, viewerId);
+            }
+
             ctx.ReplaceGuid(guid, baseItem.Id);
             // A different user may still need their own library's copy.
             if (guid == baseItem.Id)

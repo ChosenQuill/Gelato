@@ -1,5 +1,12 @@
+using System.Reflection;
+using System.Security.Claims;
+using Gelato.Decorators;
 using Gelato.Filters;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Controllers;
@@ -101,7 +108,9 @@ public class VirtualItemRouteTests
     {
         var searchId = Guid.NewGuid();
         var itemId = Guid.NewGuid();
-        var context = CreateContext(action, searchId, Guid.NewGuid());
+        var viewerId = Guid.NewGuid();
+        var context = CreateContext(action, searchId, viewerId);
+        context.HttpContext.User = Viewer(viewerId);
         context.HttpContext.Request.Method = method;
         context.ActionArguments["mediaSourceId"] = searchId.ToString("D");
 
@@ -120,7 +129,9 @@ public class VirtualItemRouteTests
         var searchId = Guid.NewGuid();
         var itemId = Guid.NewGuid();
         var sourceId = Guid.NewGuid().ToString("N");
-        var context = CreateContext("GetVideoStream", searchId, Guid.NewGuid());
+        var viewerId = Guid.NewGuid();
+        var context = CreateContext("GetVideoStream", searchId, viewerId);
+        context.HttpContext.User = Viewer(viewerId);
         context.ActionArguments["mediaSourceId"] = sourceId;
         context.ReplaceGuid(searchId, itemId);
 
@@ -132,11 +143,133 @@ public class VirtualItemRouteTests
     {
         var searchId = Guid.NewGuid();
         var itemId = Guid.NewGuid();
-        var context = CreateContext("GetPostedPlaybackInfo", searchId, Guid.NewGuid());
+        var viewerId = Guid.NewGuid();
+        var context = CreateContext("GetPostedPlaybackInfo", searchId, viewerId);
+        context.HttpContext.User = Viewer(viewerId);
         context.ActionArguments["playbackInfoDto"] = new { MediaSourceId = searchId.ToString("N") };
         context.ReplaceGuid(searchId, itemId);
 
         await CheckSourceArgumentAsync(context, itemId, itemId.ToString("N"));
+    }
+
+    [Theory]
+    [InlineData("GetVideoStream")]
+    [InlineData("GetVideoStreamByContainer")]
+    [InlineData("GetMasterHlsVideoPlaylist")]
+    [InlineData("GetVariantHlsVideoPlaylist")]
+    [InlineData("GetHlsVideoSegment")]
+    public async Task NativeRequestsWithOnlyACallerSuppliedUserDelegateWithoutPreparingMedia(
+        string action)
+    {
+        var requestedId = Guid.NewGuid();
+        var suppliedUser = Guid.NewGuid();
+        var context = CreateContext(action, requestedId, suppliedUser);
+        context.HttpContext.Request.QueryString = new QueryString($"?userId={suppliedUser:N}");
+        Assert.True(context.TryGetUserId(out _));
+
+        Assert.Equal(Guid.Empty, ResolveMediaSourceUserId(context));
+        await AssertDelegatesUnchanged(context, requestedId);
+
+        var unverifiedClaim = new Claim("Jellyfin-UserId", suppliedUser.ToString("N"));
+        context.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity([unverifiedClaim]));
+        Assert.Equal(Guid.Empty, ResolveMediaSourceUserId(context));
+        await AssertDelegatesUnchanged(context, requestedId);
+
+        context.HttpContext.User = Viewer(Guid.Empty);
+        Assert.Equal(Guid.Empty, ResolveMediaSourceUserId(context));
+        await AssertDelegatesUnchanged(context, requestedId);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AuthenticatedViewerUsesTheirOwnVisibleAlias(bool isVisible)
+    {
+        var callerSupplied = Guid.NewGuid();
+        var searchId = Guid.NewGuid();
+        var itemId = Guid.NewGuid();
+        var viewer = new User("fixture", "fixture-auth", "fixture-reset");
+        var context = CreateContext("GetVariantHlsVideoPlaylist", searchId, callerSupplied);
+        context.HttpContext.Request.QueryString = new QueryString($"?userId={callerSupplied:N}");
+        context.HttpContext.User = Viewer(viewer.Id);
+        Assert.Equal(viewer.Id, ResolveMediaSourceUserId(context));
+
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var manager = new GelatoManager(
+            NullLoggerFactory.Instance, null!, null!, null!, cache, null!, null!, null!, null!);
+        typeof(GelatoManager).GetMethod("RememberInsertedId", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(manager, [searchId, itemId, viewer.Id]);
+        var userManager = Fake<IUserManager>((method, arguments) =>
+        {
+            Assert.Equal(nameof(IUserManager.GetUserById), method.Name);
+            Assert.Equal(viewer.Id, arguments[0]);
+            return viewer;
+        });
+        var library = Fake<ILibraryManager>((method, arguments) =>
+        {
+            Assert.Equal(nameof(ILibraryManager.GetItemById), method.Name);
+            Assert.Equal(itemId, arguments[0]);
+            Assert.Same(viewer, arguments[1]);
+            return isVisible ? new Movie { Id = itemId } : null;
+        });
+
+        var filter = new InsertActionFilter(manager, userManager, library, NullLogger<InsertActionFilter>.Instance);
+        var nextCalled = false;
+        await filter.OnActionExecutionAsync(context, () =>
+        {
+            nextCalled = true;
+            Assert.Equal(isVisible ? itemId : searchId, context.ActionArguments["itemId"]);
+            return Task.FromResult(new ActionExecutedContext(context, [], context.Controller));
+        });
+        Assert.True(nextCalled);
+    }
+
+    [Fact]
+    public void ProtectedDetailKeepsTheExistingRoutedUserContract()
+    {
+        var userId = Guid.NewGuid();
+        var context = CreateContext("GetItem", Guid.NewGuid(), userId);
+
+        Assert.Equal(userId, ResolveMediaSourceUserId(context));
+    }
+
+    private static ClaimsPrincipal Viewer(Guid id) => new(new ClaimsIdentity(
+        [new Claim("Jellyfin-UserId", id.ToString("N"))], "CustomAuthentication"));
+
+    private static Guid ResolveMediaSourceUserId(ActionExecutingContext context)
+    {
+        var method = typeof(MediaSourceManagerDecorator).GetMethod(
+            "ResolveMediaSourceUserId", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        return Assert.IsType<Guid>(method.Invoke(null, [context.HttpContext, null]));
+    }
+
+    private static async Task AssertDelegatesUnchanged(ActionExecutingContext context, Guid itemId)
+    {
+        var filter = new InsertActionFilter(null!, null!, null!, NullLogger<InsertActionFilter>.Instance);
+        var nextCalled = false;
+        await filter.OnActionExecutionAsync(context, () =>
+        {
+            nextCalled = true;
+            Assert.Equal(itemId, context.ActionArguments["itemId"]);
+            return Task.FromResult(new ActionExecutedContext(context, [], context.Controller));
+        });
+        Assert.True(nextCalled);
+    }
+
+    private static T Fake<T>(Func<MethodInfo, object?[], object?> invoke) where T : class
+    {
+        var result = DispatchProxy.Create<T, FixtureProxy>();
+        ((FixtureProxy)(object)result).Handler = invoke;
+        return result;
+    }
+
+    public class FixtureProxy : DispatchProxy
+    {
+        public Func<MethodInfo, object?[], object?> Handler { get; set; } = null!;
+
+        protected override object? Invoke(MethodInfo? method, object?[]? arguments) =>
+            Handler(method!, arguments ?? []);
     }
 
     private static Task CheckSourceArgumentAsync(

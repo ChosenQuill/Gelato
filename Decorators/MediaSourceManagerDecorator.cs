@@ -75,15 +75,7 @@ public sealed class MediaSourceManagerDecorator(
         var manager = _manager.Value;
         _log.LogDebug("GetStaticMediaSources {Id}", item.Id);
         var ctx = _http.HttpContext;
-        Guid userId;
-        if (user != null)
-        {
-            userId = user.Id;
-        }
-        else
-        {
-            ctx.TryGetUserId(out userId);
-        }
+        var userId = ResolveMediaSourceUserId(ctx, user);
 
         var cfg = GelatoPlugin.Instance!.GetConfig(userId);
         if (
@@ -98,7 +90,7 @@ public sealed class MediaSourceManagerDecorator(
         var actionName =
             ctx?.Items.TryGetValue("actionName", out var ao) == true ? ao as string : null;
 
-        var allowSync = ctx.IsInsertableAction() && userId != Guid.Empty;
+        var allowSync = ctx?.IsInsertableAction() == true && userId != Guid.Empty;
         var video = item as Video;
         var cacheKey = Guid.TryParse(video?.PrimaryVersionId, out var id)
             ? id.ToString()
@@ -428,6 +420,21 @@ public sealed class MediaSourceManagerDecorator(
         BaseItem ResolveOwnerFor(MediaSourceInfo s, BaseItem fallback) =>
             // SyncStreams may have repaired this row while ILibraryManager still holds an old instance.
             Guid.TryParse(s.ETag, out var g) ? repo.RetrieveItem(g) ?? fallback : fallback;
+    }
+
+    private static Guid ResolveMediaSourceUserId(HttpContext? ctx, User? user)
+    {
+        // On native streaming routes, query or route IDs must not start an
+        // add-on refresh or select another viewer's streams.
+        if (ctx?.GetActionName().IsNativeVideoStreamAction() == true)
+        {
+            return ctx.TryGetAuthenticatedViewerId(out var viewerId) ? viewerId : Guid.Empty;
+        }
+
+        if (user is not null)
+            return user.Id;
+
+        return ctx is not null && ctx.TryGetUserId(out var userId) ? userId : Guid.Empty;
     }
 
     private static bool NeedsProbe(MediaSourceInfo source) =>
